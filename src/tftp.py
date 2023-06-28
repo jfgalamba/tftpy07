@@ -64,17 +64,17 @@ INET4Address = tuple[str, int]        # TCP/UDP address => IPv4 and port
 ##
 ###############################################################
 
-def get_file(server_addr: INET4Address, file_name: str):
+def get_file(server_addr: INET4Address, filename: str):
     """
-    Get the remote file given by `file_name` through a TFTP RRQ
+    Get the remote file given by `filename` through a TFTP RRQ
     connection to remote server at `server_addr`.
     """
     with socket(AF_INET, SOCK_DGRAM) as sock:
         sock.settimeout(INACTIVITY_TIMEOUT)
-        rrq = pack_rrq(file_name)
-        sock.sendto(rrq, server_addr)
-        next_block_num = 1
-        with open(file_name, 'wb') as file:
+        with open(filename, 'wb') as file:
+            rrq = pack_rrq(filename)
+            next_block_num = 1
+            sock.sendto(rrq, server_addr)
             while True:
                 packet, server_addr = sock.recvfrom(DEFAULT_BUFFER_SIZE)
                 opcode = unpack_opcode(packet)
@@ -106,32 +106,33 @@ def get_file(server_addr: INET4Address, file_name: str):
     #:
 #:
 
-# def get_file(server_addr: INET4Address, file_name: str):
+# def get_file(server_addr: INET4Address, filename: str):
 #     """
-#     Get the remote file given by `file_name` through a TFTP RRQ
+#     Get the remote file given by `filename` through a TFTP RRQ
 #     connection to remote server at `server_addr`.
 #     """
     # 1. Criar um socket para o servidor em server_addr
     # 2. Abrir ficheiro para escrita binária
     # 3. Enviar pacote RRQ para o servidor
     # 4. Esperar por pacote enviado pelo servidor [1]
-    #       4.1 Recebemos pacote.
-    #       4.2 Se o pacote for DAT:
+    #       4.1 Extrair opcode do pacote recebido
+    #       4.2 Se opcode for DAT:
     #           a) Obter block_number e data (ie, o bloco de dados) (UNPACK)
     #           b) Se block_number não for next_block_number ou 
-    #              next_block_number - 1) [2] => ERRO de protocolo
+    #              next_block_number - 1 => ERRO de protocolo [2] 
     #           c) Se block_number == next_block_number [3], gravamos
-    #              bloco de dados no ficheiro e incrementamos contador
+    #              bloco de dados no ficheiro e incrementamos next_block_number
     #           d) Enviar ACK reconhecendo o último pacote recebido
     #           e) Se bloco de dados < 512, terminar o RRQ
     #       4.3 Se pacote for ERR: assinalar o erro lançando a excepção apropriada
     #       4.4 Se for outro tipo de pacote: assinalar ERRO de protocolo
+    #       4.5 Voltar a 4
     #
     # [1] Terminar quando dimensão do bloco de dados do pacote 
-    #     DAT for < 512 bytes
+    #     DAT for < 512 bytes (ou se ocorrer um erro)
     # [2] next_block_number indica o próximo block_number. contador
     #     inicializado a 1 antes do passo 4.
-    # [3] Recebemos novo DAT
+    # [3] Isto quer dizer que recebemos um novo DAT
 #:
 
 def put_file():
@@ -149,7 +150,7 @@ def pack_rrq(filename: str, mode: str = DEFAULT_MODE) -> bytes:
 #:
 
 def unpack_rrq(packet: bytes) -> tuple[str, str]:
-    return unpack_rrq_wrq(packet)
+    return unpack_rrq_wrq(RRQ, packet)
 #:
 
 def pack_wrq(filename: str, mode: str = DEFAULT_MODE) -> bytes:
@@ -157,20 +158,25 @@ def pack_wrq(filename: str, mode: str = DEFAULT_MODE) -> bytes:
 #:
 
 def unpack_wrq(packet: bytes) -> tuple[str, str]:
-    return unpack_rrq_wrq(packet)
+    return unpack_rrq_wrq(WRQ, packet)
 #:
 
-def pack_rrq_wrq(opcode: int, filename: str, mode: str) -> bytes:
+def pack_rrq_wrq(opcode: int, filename: str, mode: str):
+    if not is_ascii_printable(filename):
+        raise ValueError(f"Invalid filename: {filename}. Not ASCII printable.")
     encoded_filename = filename.encode() + b'\x00'
     encoded_mode = mode.encode() + b'\x00'
     fmt = f'!H{len(encoded_filename)}s{len(encoded_mode)}s'
     return struct.pack(fmt, opcode, encoded_filename, encoded_mode)
 #:
 
-def unpack_rrq_wrq(packet: bytes) -> tuple[str, str]:
-    delim = packet.index(b'\x00', 2)
-    filename = packet[2:delim].decode()
-    mode = packet[delim + 1:-1].decode()
+def unpack_rrq_wrq(opcode: int, packet: bytes) -> tuple[str, str]:
+    received_opcode = unpack_opcode(packet)
+    if received_opcode != opcode:
+        raise ValueError(f"Invalid opcode: {received_opcode}. Expected opcode: {opcode}")
+    delim_pos = packet.index(b'\x00', 2)
+    filename = packet[2:delim_pos].decode()
+    mode = packet[delim_pos + 1:-1].decode()
     return (filename, mode)
 #:
 
@@ -200,7 +206,10 @@ def pack_ack(block_number: int) -> bytes:
 def unpack_ack(packet: bytes) -> int:
     if len(packet) > 4:
         raise ValueError(f'Invalid packet length: {len(packet)}')
-    return struct.unpack('!H', packet[2:4])[0]
+    opcode, block_number = struct.unpack('!HH', packet)
+    if opcode != ACK:
+        raise ValueError(f'Invalid opcode: {opcode}')
+    return block_number
 #:
 
 def pack_err(error_code: int, error_msg: str) -> bytes:
@@ -221,10 +230,10 @@ def unpack_err(packet: bytes) -> tuple[int, str]:
 #:
 
 def unpack_opcode(packet: bytes) -> int:
-    opcode = struct.unpack('!H', packet[0:2])
-    if opcode in (RRQ, WRQ, DAT, ACK, ERR):
+    opcode = struct.unpack('!H', packet[:2])[0]
+    if opcode not in (RRQ, WRQ, DAT, ACK, ERR):
         raise ValueError(f"Invalid opcode {opcode}")
-    return opcode[0]
+    return opcode
 #:
 
 ###############################################################
